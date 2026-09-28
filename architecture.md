@@ -1,308 +1,558 @@
-# CaptainPBX Architecture
+# Captain Core Architecture
 
 ## Overview
 
-CaptainPBX is a modern voice communications control plane built around five core principles:
+Captain Core is the reusable platform layer that powers CaptainPBX.
 
-* Multi-tenant by design
-* Secure by default
-* API-first integration
-* Strict privilege separation
-* Full auditability
+It sits between Symfony and CaptainPBX product modules, providing the core services required to build a secure, scalable, and multi-tenant communications platform.
 
-CaptainPBX manages platform state, tenancy, security, APIs, and configuration lifecycle.
+```text
+Symfony
+    ↓
+Captain Core
+    ↓
+CaptainPBX Modules
+    ↓
+Asterisk
+```
+
+Captain Core is not a framework replacement.
+
+Symfony remains responsible for application infrastructure, while Captain Core provides communications-specific platform services and CaptainPBX modules provide business functionality.
+
+This separation allows the platform to evolve independently from product features while maintaining a clean and maintainable architecture.
+
+---
+
+# Architectural Philosophy
+
+CaptainPBX is built on proven open-source technologies and follows a simple principle:
+
+> Use established components for general infrastructure and focus engineering effort on communications, telephony, security, and multi-tenancy.
+
+Instead of reinventing technologies that already exist, CaptainPBX builds upon mature and widely adopted projects including:
+
+* Symfony
+* MariaDB
+* Redis
+* Nginx
+* Asterisk
+* Linux
+
+This approach allows the project to focus on delivering PBX and communications functionality while benefiting from the stability, security, and ecosystem of these technologies.
+
+---
+
+# Why Symfony
+
+CaptainPBX is built on Symfony because it provides a mature and well-established foundation for long-term platform development.
+
+Symfony offers:
+
+* HTTP Kernel
+* Dependency Injection
+* Event Dispatcher
+* Console Framework
+* Security Components
+* Session Management
+* Cache Components
+* Mail Services
+* Testing Infrastructure
+
+These capabilities allow CaptainPBX to focus engineering effort on communications and platform services rather than implementing and maintaining general application infrastructure.
+
+Symfony's modular architecture also aligns well with the Captain Core philosophy, where platform services are built as reusable components on top of a stable application foundation.
+
+---
+
+# Why Captain Core
+
+Captain Core complements Symfony by providing communications-specific platform services.
+
+While Symfony provides application infrastructure, Captain Core provides capabilities commonly required by modern PBX platforms, including:
+
+* Multi-tenant isolation
+* Telephony event processing
+* Asterisk integration
+* Configuration compilation
+* Audit services
+* Job processing
+* Security services
+* Platform lifecycle management
+
+This separation keeps platform functionality organized while allowing product modules to focus on business features.
+
+```text
+Symfony
+    ↓
+Captain Core
+    ↓
+Product Modules
+    ↓
+Asterisk
+```
+
+Captain Core acts as the platform layer between the application framework and the communications stack.
+
+---
+
+# Building On Proven Foundations
+
+CaptainPBX intentionally builds upon established open-source projects rather than replacing them.
+
+Benefits include:
+
+* Long-term maintainability
+* Security updates
+* Community support
+* Extensive documentation
+* Operational familiarity
+* Predictable upgrade paths
+
+This allows engineering effort to remain focused on PBX innovation rather than rebuilding infrastructure components that already exist.
+
+---
+
+# Why Nginx
+
+Nginx serves as the front-end gateway for CaptainPBX.
+
+Responsibilities include:
+
+* TLS termination
+* HTTP request routing
+* Reverse proxying
+* Static asset delivery
+* Compression
+* Rate limiting
+* Security headers
+
+Benefits include:
+
+### Performance
+
+Nginx uses an event-driven architecture that efficiently handles large numbers of concurrent connections.
+
+### Resource Efficiency
+
+Memory usage remains predictable under load.
+
+### Security
+
+Nginx provides an additional boundary between external traffic and application services.
+
+### Static Asset Delivery
+
+JavaScript, CSS, fonts, images, and SPA assets are served directly without consuming PHP resources.
+
+---
+
+# Why PHP-FPM
+
+PHP-FPM (FastCGI Process Manager) executes CaptainPBX application code.
+
+Nginx and PHP-FPM have separate responsibilities.
+
+```text
+Browser
+    ↓
+Nginx
+    ↓
+PHP-FPM
+    ↓
+Symfony
+    ↓
+Captain Core
+```
+
+Benefits include:
+
+### Process Isolation
+
+PHP execution is isolated from the web server.
+
+Application failures do not directly impact Nginx.
+
+### Worker Management
+
+PHP-FPM manages worker pools independently, allowing predictable scaling and resource control.
+
+### Resource Limits
+
+Memory usage, execution limits, and worker counts can be tuned without modifying application code.
+
+### Security
+
+Application services run under a dedicated service account rather than elevated operating system privileges.
+
+---
+
+# Why Separate Linux Users
+
+CaptainPBX intentionally separates responsibilities between Linux service accounts.
+
+```text
+root
+ └── captain-system-agent
+
+captain
+ ├── PHP-FPM
+ ├── Scheduler
+ ├── Workers
+ ├── CLI
+ └── Event Services
+
+asterisk
+ └── SIP and RTP Processing
+```
+
+Benefits include:
+
+### Principle Of Least Privilege
+
+Each component receives only the permissions required for its responsibilities.
+
+### Security Containment
+
+Compromise of one component does not automatically grant access to all platform resources.
+
+### Operational Clarity
+
+Application services, operating system services, and media services remain clearly separated.
+
+---
+
+# Why Asterisk Is Not The Source Of Truth
+
+CaptainPBX separates configuration management from call execution.
+
+Asterisk is responsible for media processing, SIP signaling, and dialplan execution.
+
+CaptainPBX owns platform state and configuration.
+
+```text
+Admin UI / API
+        ↓
+     MariaDB
+        ↓
+  Captain Core
+        ↓
+ Configuration Compiler
+        ↓
+ Generated *_captain.conf
+        ↓
+     Asterisk
+```
+
+Benefits include:
+
+* Auditability
+* Multi-tenant consistency
+* API-driven management
+* Repeatable deployments
+* Centralized validation
+* Easier automation
+* Simplified backup and restore
 
 Asterisk executes calls.
 
-The database is the source of truth.
+CaptainPBX manages platform state.
 
 ---
 
-## System Overview
+# Responsibilities
 
-```mermaid
-flowchart TB
+Captain Core owns the platform services that are shared across all CaptainPBX modules.
 
-  subgraph world ["Today's Communication World"]
-    People["People<br/>Phones • WebRTC • Contact Center Agents"]
-    Carriers["SIP Trunks<br/>PSTN • DID Providers"]
-    Software["CRM<br/>Billing • Voice AI • Automation"]
-  end
+## Multi-Tenancy
 
-  subgraph plane ["CaptainPBX Control Plane"]
-    direction TB
+* TenantContext
+* Tenant isolation
+* Tenant-aware repositories
+* Cross-tenant protection
 
-    Surfaces["Admin SPA<br/>User Portal<br/>OpenAPI / JWT"]
+## Security
 
-    Core["Captain Core"]
+* Authentication infrastructure
+* Authorization
+* Permission evaluation
+* Audit framework
 
-    Tenant["Multi-Tenant Engine"]
-    Shield["Captain Shield"]
-    Audit["Audit Engine"]
+## Data Access
 
-    Surfaces --> Core
-    Core --> Tenant
-    Core --> Shield
-    Core --> Audit
-  end
+* Tenant-aware Records
+* Doctrine integration
+* Repository abstractions
 
-  subgraph execution ["Execution Layer"]
-    Asterisk["Asterisk<br/>Media Engine"]
-    Agent["System Agent"]
-  end
+## Telephony Platform
 
-  People --> Surfaces
-  Software --> Surfaces
-  Carriers --> Shield
+* Asterisk integration
+* AMI integration
+* ARI integration
+* Dialplan compilation
+* Configuration generation
 
-  Shield --> Asterisk
+## Platform Services
 
-  Core -->|"Generated Configuration"| Asterisk
-  Core -->|"Allowlisted Verbs"| Agent
-```
+* Jobs
+* Scheduler
+* Event processing
+* Redis integration
+* Secrets management
+* Module management
 
 ---
 
-## Architectural Philosophy
+# What Captain Core Is Not
 
-Traditional PBX platforms often treat Asterisk as both the source of truth and execution engine.
+Captain Core provides platform services.
 
-CaptainPBX separates these responsibilities.
+It does not provide product functionality.
 
-### Source Of Truth
+| Platform Services (Captain Core) | Product Features (Modules) |
+| -------------------------------- | -------------------------- |
+| TenantContext                    | Extensions                 |
+| Audit Engine                     | Queues                     |
+| Authorization                    | IVR                        |
+| Records                          | Trunks                     |
+| Dialplan Compiler                | Inbound Routes             |
+| Event Pipeline                   | Voice AI                   |
+| Module Loader                    | User Portal Features       |
+| Asterisk Manager                 | Call Center Features       |
 
-All configuration resides in MariaDB.
+If functionality can exist independently as a product capability, it belongs in a module.
+
+---
+
+# Core Services
+
+## TenantContext
+
+TenantContext is the foundation of platform isolation.
+
+Responsibilities:
+
+* Resolve tenant identity
+* Enforce tenant boundaries
+* Prevent cross-tenant access
+* Supply tenant information to repositories
+
+Rules:
+
+* TenantContext is mandatory for tenant-owned operations
+* Frontend tenant selectors are convenience only
+* Browser supplied tenant identifiers are never trusted
+
+---
+
+## Records
+
+Records provide fail-closed repository access.
+
+Responsibilities:
+
+* Automatic tenant scoping
+* Repository abstraction
+* Safe query patterns
+* Consistent data access
+
+Without TenantContext, tenant-owned data cannot be accessed.
+
+This helps prevent accidental cross-tenant data exposure.
+
+---
+
+## Audit Engine
+
+Every significant platform action generates an audit record.
 
 Examples:
+
+* User creation
+* Extension creation
+* Permission changes
+* Configuration deployment
+* Security changes
+* Administrative actions
+
+Goals:
+
+* Compliance
+* Traceability
+* Operational visibility
+
+---
+
+## Authorization
+
+Authorization determines what an authenticated identity may perform.
+
+Responsibilities:
+
+* Role evaluation
+* Permission evaluation
+* Tenant scope enforcement
+* Administrative boundary protection
+
+Authorization decisions are centralized and shared across modules.
+
+---
+
+## Module Manager
+
+The Module Manager provides:
+
+* Module discovery
+* Module registration
+* Dependency validation
+* Service loading
+* Lifecycle management
+
+Modules remain independent while integrating through common platform services.
+
+---
+
+# Asterisk Integration
+
+Captain Core owns interaction with Asterisk.
+
+Modules communicate through platform services rather than directly managing telephony infrastructure.
+
+```text
+Module
+    ↓
+Captain Core Port
+    ↓
+Asterisk Manager
+    ↓
+AMI / ARI
+    ↓
+Asterisk
+```
+
+This provides a consistent integration layer across all modules.
+
+---
+
+# Dialplan Manager
+
+The Dialplan Manager compiles configuration from platform records.
+
+Inputs include:
 
 * Extensions
 * Queues
 * IVRs
-* Ring Groups
-* Trunks
-* Routing Rules
-* Security Policies
+* Routes
+* Feature Codes
 
-### Execution
-
-Asterisk receives generated configuration and executes calls.
+Outputs:
 
 ```text
-Admin/API
-    │
-    ▼
-MariaDB
-    │
-    ▼
-CaptainPBX Config Generator
-    │
-    ▼
 *_captain.conf
-    │
-    ▼
-Asterisk Reload
 ```
 
-Generated configuration is considered output.
-
-Manual modifications are not supported.
+Generated configuration is considered output rather than the source of truth.
 
 ---
 
-## Layered Design
+# Event Processing
+
+Captain Core owns the telephony event pipeline.
+
+Sources include:
+
+* AMI
+* CEL
+* CDR
+* ARI Events
+
+Pipeline:
 
 ```text
-┌──────────────────────────┐
-│ Admin SPA / User Portal  │
-├──────────────────────────┤
-│ REST API / JWT           │
-├──────────────────────────┤
-│ Captain Core             │
-├──────────────────────────┤
-│ Modules                  │
-├──────────────────────────┤
-│ Database / Cache         │
-├──────────────────────────┤
-│ System Agent             │
-├──────────────────────────┤
-│ Asterisk                 │
-└──────────────────────────┘
+Asterisk
+    ↓
+Event Pump
+    ↓
+Normalization
+    ↓
+Redis
+    ↓
+Consumers
 ```
 
-Each layer has a single responsibility.
+Consumers may include:
 
----
-
-## Core Components
-
-### Captain Core
-
-The Captain Core provides:
-
-* Authentication
-* Authorization
-* Tenant Context
-* Configuration Management
-* Event Routing
-* Module Framework
-* API Services
-* Apply Operations
-
----
-
-### Captain Shield
-
-Captain Shield provides:
-
-* SIP access control
-* HTTPS access control
-* Firewall integration
-* Threat intelligence
-* Security policy enforcement
-
-Shield determines who may communicate with the platform.
-
----
-
-### Audit Engine
-
-Every significant action generates an audit record.
-
-Examples:
-
-* Configuration changes
-* Security modifications
-* Apply operations
-* Administrative actions
-* Privileged operations
-
----
-
-### Multi-Tenant Engine
-
-Tenant isolation is enforced centrally.
-
-The browser never supplies tenant identifiers.
-
-Tenant context is derived from:
-
-* Session identity
-* JWT identity
-* Administrative scope
-
-This prevents accidental cross-tenant access.
-
----
-
-## Data Layer
-
-### MariaDB
-
-MariaDB stores:
-
-* Platform configuration
-* Tenants
-* Extensions
+* Reporting
 * Queues
-* User accounts
-* Audit records
-* Job schedules
-
-### Redis
-
-Redis provides:
-
-* Queue management
-* Event buffering
-* Distributed locking
-* Session caching
-
----
-
-## Media Layer
-
-Asterisk is responsible for:
-
-* SIP signaling
-* RTP media
-* Queue execution
-* IVR execution
-* Call recording
 * Presence
-
-Asterisk does not own platform state.
-
-CaptainPBX generates the runtime configuration consumed by Asterisk.
-
----
-
-## System Agent
-
-The System Agent is the only root-level component.
-
-Responsibilities include:
-
-* Firewall management
-* Timezone changes
-* Network operations
-* Service management
-* Package operations
-
-The agent exposes named verbs over a Unix socket.
-
-Arbitrary shell execution is not supported.
+* Voice AI
+* CRM integrations
+* Automation services
 
 ---
 
-## Event Flow
+# Job Framework
 
-```mermaid
-sequenceDiagram
+Captain Core provides platform scheduling and background processing.
 
-  participant Client
-  participant API
-  participant DB
-  participant Audit
-  participant Asterisk
-
-  Client->>API: Update Configuration
-  API->>DB: Save Changes
-  API->>Audit: Create Audit Record
-
-  Client->>API: Sync and Apply
-
-  API->>Asterisk: Generate Configuration
-  API->>Asterisk: Reload
-
-  Asterisk-->>API: Success
+```text
+Scheduler
+    ↓
+Redis Queue
+    ↓
+Workers
+    ↓
+Job Handlers
 ```
 
----
+Responsibilities:
 
-## Technology Stack
+* Scheduling
+* Concurrency control
+* Timeouts
+* Retry policies
+* Execution history
+* Tenant fairness
 
-| Layer            | Technology    |
-| ---------------- | ------------- |
-| Web              | Nginx         |
-| Application      | PHP 8+        |
-| Database         | MariaDB       |
-| Queue            | Redis         |
-| Media            | Asterisk      |
-| Security         | nftables      |
-| Authentication   | Session + JWT |
-| APIs             | OpenAPI       |
-| Operating System | Linux         |
+Modules register JobHandlers.
+
+Captain Core executes them.
 
 ---
 
-## Summary
+# System Agent Integration
 
-CaptainPBX is a control-plane architecture where:
+Captain Core is the only platform component that communicates with the System Agent.
 
-* MariaDB is the source of truth
-* CaptainPBX manages policy and configuration
-* Asterisk executes calls
-* System Agent performs privileged operations
-* Multi-tenancy is enforced centrally
-* Security is integrated into the platform design
+```text
+Module
+    ↓
+Captain Core
+    ↓
+System Agent
+    ↓
+Operating System
+```
 
+This provides a controlled boundary between application services and privileged operating system operations.
+
+---
+
+# Design Goals
+
+Captain Core exists to provide:
+
+1. Multi-tenant isolation
+2. Security by default
+3. Reusable PBX platform services
+4. Consistent module development
+5. Safe Asterisk integration
+6. Operational observability
+7. Long-term maintainability
+
+Captain Core provides the platform.
+
+Modules provide the product.
+
+Together they form the foundation of CaptainPBX.
