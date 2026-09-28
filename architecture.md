@@ -1,308 +1,201 @@
-# CaptainPBX Architecture
+# CaptainPBX System Architecture
 
-## Overview
+**One appliance. Four privilege boundaries. Zero manual configuration files.**
 
-CaptainPBX is a modern voice communications control plane built around five core principles:
-
-* Multi-tenant by design
-* Secure by default
-* API-first integration
-* Strict privilege separation
-* Full auditability
-
-CaptainPBX manages platform state, tenancy, security, APIs, and configuration lifecycle.
-
-Asterisk executes calls.
-
-The database is the source of truth.
+CaptainPBX is a modern telecommunications control plane built on **Debian 13**, separating user management, application logic, media execution, and system privileges into distinct, isolated operational layers.
 
 ---
 
-## System Overview
+## 1. System Architecture at a Glance
 
 ```mermaid
 flowchart TB
-
-  subgraph world ["Today's Communication World"]
-    People["People<br/>Phones • WebRTC • Contact Center Agents"]
-    Carriers["SIP Trunks<br/>PSTN • DID Providers"]
-    Software["CRM<br/>Billing • Voice AI • Automation"]
+  subgraph humans [User Surfaces]
+    Admin[Admin SPA - React]
+    Portal[User Portal - React]
+    Phone[SIP / WebRTC Endpoints]
   end
 
-  subgraph plane ["CaptainPBX Control Plane"]
-    direction TB
-
-    Surfaces["Admin SPA<br/>User Portal<br/>OpenAPI / JWT"]
-
-    Core["Captain Core"]
-
-    Tenant["Multi-Tenant Engine"]
-    Shield["Captain Shield"]
-    Audit["Audit Engine"]
-
-    Surfaces --> Core
-    Core --> Tenant
-    Core --> Shield
-    Core --> Audit
+  subgraph edge [OS & Edge Layer]
+    Nginx[Nginx Reverse Proxy / TLS]
+    Shield[Captain Shield - nftables Firewall]
   end
 
-  subgraph execution ["Execution Layer"]
-    Asterisk["Asterisk<br/>Media Engine"]
-    Agent["System Agent"]
+  subgraph app [Application Layer - User: captain]
+    Core[Captain Core]
+    Mods[Product Modules]
+    FPM[PHP-FPM 8.4]
+    Jobs[captain-jobs - BullMQ Queue Workers]
+    Ev[captain-events - AMI Event Pump]
   end
 
-  People --> Surfaces
-  Software --> Surfaces
-  Carriers --> Shield
+  subgraph priv [Privileged OS Layer - Root]
+    Agent[captain-system-agent - Unix Socket]
+  end
 
-  Shield --> Asterisk
+  subgraph data [Data Layer]
+    DB[(MariaDB - Tenant Data)]
+    Redis[(Redis - Streams & Queues)]
+  end
 
-  Core -->|"Generated Configuration"| Asterisk
-  Core -->|"Allowlisted Verbs"| Agent
+  subgraph media [Media Engine - User: asterisk]
+    Ast[Asterisk PJSIP Engine]
+  end
+
+  Admin -->|HTTPS| Nginx
+  Portal -->|HTTPS| Nginx
+  Phone -->|SIP / RTP| Shield
+  Nginx --> Shield
+  Shield --> Nginx
+  Shield --> Ast
+  Nginx --> FPM
+  FPM --> Core
+  Core --> Mods
+  Core --> DB
+  Core --> Redis
+  Core -->|Allowlisted Verbs| Agent
+  Ev --> Redis
+  Jobs --> Redis
+  Jobs --> Core
+  Ast -->|AMI / CEL| Ev
+  Core -->|Generated *_captain.conf| Ast
 ```
 
 ---
 
-## Architectural Philosophy
+## 2. Layered Responsibilities
 
-Traditional PBX platforms often treat Asterisk as both the source of truth and execution engine.
+| Layer | Component | Core Responsibilities | What It Must NOT Do |
+| :--- | :--- | :--- | :--- |
+| **OS Edge** | Debian 13, Nginx, Captain Shield | SSL termination, default-deny host firewall, rate limiting, GeoIP filtering | Execute application logic or bypass privilege boundaries |
+| **Captain Core** | Symfony (PHP 8.4) Platform Services | Tenant Context isolation, auth, audit hooks, job queueing, config compiler | Contain custom UI feature pages or un-audited system calls |
+| **Product Modules** | `/usr/src/captainpbx-modules/*` | Module business logic (Shield, Auth, Trust, IVR, Queues), REST APIs, UI components | Edit Asterisk `/etc/asterisk` files or issue `shell_exec` |
+| **Media Engine** | Asterisk (PJSIP) | SIP registration, RTP routing, dialplan execution, channel bridging | Act as the source of truth for users, tenants, or extensions |
+| **Privileged OS** | `captain-system-agent` | Execute specific system verbs (firewall apply, ACME certs, system time) | Allow unrestricted root shell execution or raw command string execution |
 
-CaptainPBX separates these responsibilities.
+---
 
-### Source Of Truth
+## 3. Non-Root Security & Privilege Split
 
-All configuration resides in MariaDB.
+CaptainPBX enforces a strict system-user privilege boundary across the operating system to prevent web application compromises from escalating to OS root access.
 
-Examples:
+```mermaid
+flowchart LR
+  subgraph debian [Debian 13 Security Boundaries]
+    R[User: root<br>captain-system-agent]
+    C[User: captain<br>PHP-FPM, CLI, Workers, Ingest]
+    A[User: asterisk<br>PJSIP, RTP, Media]
+  end
 
-* Extensions
-* Queues
-* IVRs
-* Ring Groups
-* Trunks
-* Routing Rules
-* Security Policies
-
-### Execution
-
-Asterisk receives generated configuration and executes calls.
-
-```text
-Admin/API
-    │
-    ▼
-MariaDB
-    │
-    ▼
-CaptainPBX Config Generator
-    │
-    ▼
-*_captain.conf
-    │
-    ▼
-Asterisk Reload
+  C -->|JSON Verbs over Unix Socket| R
+  C -->|Write /var/lib/captainpbx/asterisk/*_captain.conf| A
 ```
 
-Generated configuration is considered output.
-
-Manual modifications are not supported.
-
----
-
-## Layered Design
-
-```text
-┌──────────────────────────┐
-│ Admin SPA / User Portal  │
-├──────────────────────────┤
-│ REST API / JWT           │
-├──────────────────────────┤
-│ Captain Core             │
-├──────────────────────────┤
-│ Modules                  │
-├──────────────────────────┤
-│ Database / Cache         │
-├──────────────────────────┤
-│ System Agent             │
-├──────────────────────────┤
-│ Asterisk                 │
-└──────────────────────────┘
-```
-
-Each layer has a single responsibility.
+* **`captain` user**: Runs PHP-FPM, asynchronous BullMQ workers, the AMI event ingest pump, and CLI commands. `shell_exec`, `exec`, `passthru`, and `system` are disabled in PHP-FPM.
+* **`asterisk` user**: Dedicated strictly to media processing, RTP streams, and PJSIP channel execution.
+* **`root` user**: Runs only the `captain-system-agent` daemon listening on a local Unix socket. It exposes an **allowlist of named verbs** (e.g., `firewall.apply`, `timezone.set`, `acme.renew`).
 
 ---
 
-## Core Components
+## 4. How Configuration Changes Become Calls
 
-### Captain Core
-
-The Captain Core provides:
-
-* Authentication
-* Authorization
-* Tenant Context
-* Configuration Management
-* Event Routing
-* Module Framework
-* API Services
-* Apply Operations
-
----
-
-### Captain Shield
-
-Captain Shield provides:
-
-* SIP access control
-* HTTPS access control
-* Firewall integration
-* Threat intelligence
-* Security policy enforcement
-
-Shield determines who may communicate with the platform.
-
----
-
-### Audit Engine
-
-Every significant action generates an audit record.
-
-Examples:
-
-* Configuration changes
-* Security modifications
-* Apply operations
-* Administrative actions
-* Privileged operations
-
----
-
-### Multi-Tenant Engine
-
-Tenant isolation is enforced centrally.
-
-The browser never supplies tenant identifiers.
-
-Tenant context is derived from:
-
-* Session identity
-* JWT identity
-* Administrative scope
-
-This prevents accidental cross-tenant access.
-
----
-
-## Data Layer
-
-### MariaDB
-
-MariaDB stores:
-
-* Platform configuration
-* Tenants
-* Extensions
-* Queues
-* User accounts
-* Audit records
-* Job schedules
-
-### Redis
-
-Redis provides:
-
-* Queue management
-* Event buffering
-* Distributed locking
-* Session caching
-
----
-
-## Media Layer
-
-Asterisk is responsible for:
-
-* SIP signaling
-* RTP media
-* Queue execution
-* IVR execution
-* Call recording
-* Presence
-
-Asterisk does not own platform state.
-
-CaptainPBX generates the runtime configuration consumed by Asterisk.
-
----
-
-## System Agent
-
-The System Agent is the only root-level component.
-
-Responsibilities include:
-
-* Firewall management
-* Timezone changes
-* Network operations
-* Service management
-* Package operations
-
-The agent exposes named verbs over a Unix socket.
-
-Arbitrary shell execution is not supported.
-
----
-
-## Event Flow
+Application changes made in the Admin SPA are written to MariaDB as tenant-scoped records, compiled into configuration fragments, and applied to Asterisk without raw file editing.
 
 ```mermaid
 sequenceDiagram
+  autonumber
+  participant UI as Admin SPA
+  participant API as PHP Core / Modules
+  participant DB as MariaDB
+  participant Ag as System Agent
+  participant Ast as Asterisk Engine
 
-  participant Client
-  participant API
-  participant DB
-  participant Audit
-  participant Asterisk
-
-  Client->>API: Update Configuration
-  API->>DB: Save Changes
-  API->>Audit: Create Audit Record
-
-  Client->>API: Sync and Apply
-
-  API->>Asterisk: Generate Configuration
-  API->>Asterisk: Reload
-
-  Asterisk-->>API: Success
+  UI->>API: POST /api/v1/extensions (or IVR / Firewall)
+  API->>DB: Save Tenant-Scoped Record
+  API->>API: Execute Audit Hook (Redact Secrets)
+  
+  alt OS Configuration Change (e.g., Shield, Hostname)
+    API->>Ag: Send Allowlisted Verb JSON over Unix Socket
+    Ag-->>API: Status OK / Error
+  else Telephony Configuration Change
+    UI->>API: Trigger Sync & Apply
+    API->>Ast: Write /var/lib/captainpbx/asterisk/*_captain.conf
+    API->>Ast: Trigger Asterisk Module Reload via AMI
+    Ast-->>API: Confirmation
+  end
 ```
 
 ---
 
-## Technology Stack
+## 5. Asynchronous Job Pipeline
 
-| Layer            | Technology    |
-| ---------------- | ------------- |
-| Web              | Nginx         |
-| Application      | PHP 8+        |
-| Database         | MariaDB       |
-| Queue            | Redis         |
-| Media            | Asterisk      |
-| Security         | nftables      |
-| Authentication   | Session + JWT |
-| APIs             | OpenAPI       |
-| Operating System | Linux         |
+Background tasks (such as CDR processing, email notifications, maintenance, and scheduled reports) run asynchronously through **Redis BullMQ** to prevent blocking web requests or media handling.
+
+```mermaid
+flowchart TB
+  Timer[captain-scheduler.timer] -->|Scan Due Jobs| Scan[Scan captaincore_job_runs]
+  Scan -->|Enqueue| Bull[Redis BullMQ]
+  Bull -->|Worker Concurrency| Workers[captain-jobs Workers]
+  Workers -->|Execute CLI| Exec[php captain jobs:exec]
+  Exec -->|Run Handler| Handler[JobHandler]
+  Handler -->|Update Status| DB[(MariaDB Log)]
+```
 
 ---
 
-## Summary
+## 6. Real-Time Telephony Event Architecture
 
-CaptainPBX is a control-plane architecture where:
+Asterisk Manager Interface (AMI) events are ingested by a dedicated event pump service (`captain-events`) and split across isolated Redis stream lanes to eliminate bottlenecking.
 
-* MariaDB is the source of truth
-* CaptainPBX manages policy and configuration
-* Asterisk executes calls
-* System Agent performs privileged operations
-* Multi-tenancy is enforced centrally
-* Security is integrated into the platform design
+```mermaid
+flowchart LR
+  Ast[Asterisk AMI Engine] -->|Raw Events| Pump[captain-events Pump]
+  
+  subgraph lanes [Isolated Event Lanes]
+    Pump -->|Lane 1| CDR[CDR & CEL Event Stream]
+    Pump -->|Lane 2| Queue[Queue Analytics Stream]
+    Pump -->|Lane 3| BLF[BLF & Presence Fanout]
+  end
 
+  CDR --> DB[(MariaDB CDR Storage)]
+  Queue --> Stats[Live Queue Analytics Engine]
+  BLF --> WebSockets[Real-time WebSockets / SPA]
+```
+
+---
+
+## 7. Host Security & Network Isolation (Captain Shield)
+
+Captain Shield enforces a default-deny architecture. Internal infrastructure services are completely hidden from the public WAN.
+
+```mermaid
+flowchart TB
+  P[Incoming Packet] --> Check1{Blocked IP / IDS Ban / APIBAN?}
+  Check1 -->|Yes| Drop1[DROP Packet]
+  Check1 -->|No| Check2{Admin / SIP Allowlist Match?}
+  Check2 -->|No| Drop2[DROP Packet]
+  Check2 -->|Yes| Check3{GeoIP Country Rule Allowed?}
+  Check3 -->|No| Drop3[DROP Packet]
+  Check3 -->|Yes| Check4{nftables Rate Limit OK?}
+  Check4 -->|No| Drop4[DROP Packet]
+  Check4 -->|Yes| Accept[ACCEPT Packet]
+```
+
+```mermaid
+flowchart LR
+  subgraph WAN [Exposed to Internet - Allowed Ports Only]
+    HTTPS[Port 443 / 80 - Nginx Admin/Portal]
+    SIP[Port 5060 / 5061 - SIP Signals]
+    RTP[UDP Range - Media RTP]
+  end
+
+  subgraph Isolated [Hidden Internal Services - Never Exposed on WAN]
+    AMI[AMI - Port 5038]
+    ARI[ARI]
+    SQL[MariaDB - Port 3306]
+    RDS[Redis - Port 6379]
+  end
+
+  Shield[Captain Shield nftables] --> WAN
+  Shield -.-x Isolated
+```

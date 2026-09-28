@@ -1,416 +1,241 @@
-# Captain Core Architecture
+# CaptainPBX Core Architecture & Domain Model
 
-## Overview
+**Product:** CaptainPBX  
+**Platform:** Captain Core (Symfony / PHP 8.4)  
+**Target Engine:** Asterisk PJSIP  
 
-Captain Core is the reusable platform layer that powers CaptainPBX.
-
-It sits between Symfony and product modules and provides the services required to build a secure, multi-tenant PBX platform.
-
-```text
-Symfony
-    ↓
-Captain Core
-    ↓
-CaptainPBX Modules
-    ↓
-Asterisk
-```
-
-Captain Core is **not a framework replacement**.
-
-Symfony remains responsible for:
-
-* HTTP routing
-* Dependency Injection
-* Sessions
-* CSRF protection
-* Event Dispatching
-* Console commands
-* Mail delivery
-* Cache abstractions
-
-Captain Core provides PBX-specific platform services on top of Symfony.
+This document defines the underlying domain model, database boundaries, multi-tenant consistency rules, and module dependencies governing CaptainPBX.
 
 ---
 
-## Responsibilities
-
-Captain Core owns:
-
-### Multi-Tenancy
-
-* TenantContext
-* Tenant isolation
-* Tenant-aware repositories
-* Cross-tenant protection
-
-### Security
-
-* Authentication infrastructure
-* Authorization
-* Permission evaluation
-* Audit framework
-
-### Data Access
-
-* Tenant-aware Records
-* Doctrine integration
-* Repository abstractions
-
-### Telephony Platform
-
-* Asterisk integration
-* AMI integration
-* ARI integration
-* Dialplan compilation
-* Configuration generation
-
-### Platform Services
-
-* Jobs
-* Scheduler
-* Event processing
-* Redis integration
-* Secrets management
-* Module management
-
----
-
-## What Captain Core Is Not
-
-Captain Core does not own product features.
-
-Examples:
-
-| Belongs In Core   | Belongs In Modules |
-| ----------------- | ------------------ |
-| TenantContext     | Extensions         |
-| Audit Engine      | Queues             |
-| Authorization     | IVR                |
-| Records           | Trunks             |
-| Dialplan Compiler | Inbound Routes     |
-| Event Pipeline    | Voice AI           |
-| Module Loader     | Portal Pages       |
-
-If functionality can exist independently as a product capability, it belongs in a module.
-
----
-
-## Architectural Layers
+## 1. Core Technology Stack
 
 ```mermaid
 flowchart TB
+  subgraph Presentation
+    React[React SPA + TypeScript + Vite]
+    Portal[User Portal Component Library]
+  end
 
-    Symfony["Symfony"]
+  subgraph CorePlatform [Captain Core Platform]
+    Sym[Symfony - PHP 8.4 Framework]
+    Domain[Domain Models & Repositories]
+    TenantCtx[TenantContext & Fail-Closed Guard]
+    ConfigComp[Asterisk Config Compiler]
+  end
 
-    Core["Captain Core"]
+  subgraph Modules [Product Modules - /usr/src/captainpbx-modules/*]
+    AuthMod[Captain Auth]
+    ShieldMod[Captain Shield]
+    TrustMod[Captain Trust]
+    PBXMods[Extensions, Queues, IVR, CDR, Directory]
+  end
 
-    Modules["CaptainPBX Modules"]
+  subgraph Infrastructure
+    DB[(MariaDB - InnoDB)]
+    Redis[(Redis - Streams & BullMQ)]
+    AstEngine[Asterisk PJSIP Engine]
+    Agent[captain-system-agent - Root Daemon]
+  end
 
-    Asterisk["Asterisk"]
-
-    Symfony --> Core
-    Core --> Modules
-    Modules --> Asterisk
+  React --> Sym
+  Portal --> Sym
+  Sym --> CorePlatform
+  CorePlatform --> Modules
+  Modules --> DB
+  Modules --> Redis
+  CorePlatform --> ConfigComp
+  ConfigComp --> AstEngine
+  CorePlatform --> Agent
 ```
 
 ---
 
-## Captain Core Services
+## 2. Strict Domain Model
 
-### TenantContext
+To maintain strict domain boundaries, core concepts are explicitly decoupled into individual entities joined through explicit relationship mapping.
 
-TenantContext is the foundation of platform isolation.
+```mermaid
+flowchart TB
+  subgraph Platform [Platform Identity Context]
+    Identity[Identity<br>Auth Credentials / TOTP Secrets]
+    User[User<br>Global Identity Record]
+  end
 
-Responsibilities:
+  subgraph TenantBoundary [Tenant Isolation Boundary]
+    Tenant[Tenant<br>Isolation Context]
+    UserTenant[UserTenant<br>Membership Join]
+    Ext[Extension<br>Telephony Identity e.g. 1001]
+    Dev[Device<br>PJSIP Credentials & Endpoint]
+    Group[Group / Team<br>Organizational Unit]
+    DirContact[Directory Contact<br>External Phonebook Entry]
+  end
 
-* Resolve tenant identity
-* Enforce tenant boundaries
-* Prevent cross-tenant access
-* Supply tenant information to repositories
-
-Rules:
-
-* TenantContext is mandatory for tenant-owned operations
-* Frontend tenant selectors are convenience only
-* Browser supplied tenant identifiers are never trusted
-
----
-
-### Records
-
-Records provide fail-closed repository access.
-
-Responsibilities:
-
-* Automatic tenant scoping
-* Repository abstraction
-* Safe query patterns
-* Consistent data access
-
-Without TenantContext, tenant-owned data cannot be accessed.
-
-This prevents accidental cross-tenant data exposure.
-
----
-
-### Audit Engine
-
-Every important platform action generates an audit record.
-
-Examples:
-
-* User creation
-* Extension creation
-* Permission changes
-* Apply operations
-* Firewall updates
-* System Agent requests
-
-Goals:
-
-* Compliance
-* Traceability
-* Operational visibility
-
----
-
-### Authorization
-
-Authorization determines what an authenticated identity may perform.
-
-Responsibilities:
-
-* Role evaluation
-* Permission evaluation
-* Tenant scope enforcement
-* Administrative boundary protection
-
-Authorization decisions are centralized.
-
-Modules consume authorization services rather than implementing their own logic.
-
----
-
-### Module Manager
-
-The Module Manager provides:
-
-* Module discovery
-* Module lifecycle management
-* Registration
-* Dependency validation
-* Service loading
-
-Modules are loaded dynamically through the platform.
-
----
-
-## Asterisk Integration
-
-Captain Core owns all interaction with Asterisk.
-
-Modules never:
-
-* Edit `/etc/asterisk`
-* Execute Asterisk shell commands
-* Directly manage configuration files
-
-Instead:
-
-```text
-Module
-    ↓
-Captain Core Port
-    ↓
-Asterisk Manager
-    ↓
-AMI / ARI
-    ↓
-Asterisk
+  Identity -->|1:1 or 1:N| User
+  User --> UserTenant
+  Tenant --> UserTenant
+  UserTenant --> Ext
+  Ext -->|1:N| Dev
+  User -->|Member of| Group
+  Tenant --> DirContact
 ```
 
-This provides a consistent integration layer.
+### Key Concept Rules
+
+* **`User` ≠ `Identity`**: `Identity` handles authentication credentials (local, TOTP MFA, future SAML/OIDC). `User` represents the human entity.
+* **`User` ≠ `Extension`**: Linked via a 1:1 primary owner relationship (`UserExtension`), but stored in separate tables.
+* **`Extension` ≠ `Device`**: Extensions own 0 or more endpoints (`Device`). Each `Device` holds its own unique PJSIP authentication credentials (e.g., `acme-1001-1`, `acme-1001-2`).
+* **`Group` ≠ `Role`**: `Group` represents organizational teams (Sales, Support). `Role` represents RBAC authorization bundles.
+* **`Tenant` = Hard Isolation Boundary**: Every tenant-owned database table carries `tenant_id`. Cross-tenant queries are blocked at the repository level.
 
 ---
 
-## Dialplan Manager
+## 3. Entity Relationship Diagram (ERD)
 
-The Dialplan Manager compiles configuration from database records.
+```mermaid
+erDiagram
+    TENANTS ||--o{ USER_TENANTS : owns
+    USERS ||--o{ USER_TENANTS : joins
+    USERS ||--o{ USER_IDENTITIES : authenticates
+    IDENTITIES ||--|| USER_IDENTITIES : holds
+    
+    TENANTS ||--o{ EXTENSIONS : scope
+    TENANTS ||--o{ GROUPS : scope
+    TENANTS ||--o{ DIRECTORY_CONTACTS : scope
+    
+    USER_TENANTS ||--o{ USER_EXTENSIONS : links
+    EXTENSIONS ||--o{ USER_EXTENSIONS : assigns
+    EXTENSIONS ||--o{ DEVICES : owns
+    
+    USERS ||--o{ GROUP_MEMBERSHIPS : belongs
+    GROUPS ||--o{ GROUP_MEMBERSHIPS : contains
+    
+    ROLES ||--o{ ROLE_PERMISSIONS : defines
+    USER_TENANTS ||--o{ USER_ROLES : grants
+    ROLES ||--o{ USER_ROLES : assigns
 
-Inputs:
+    TENANTS {
+        ulid id PK
+        string name
+        string sip_domain
+    }
 
-* Extensions
-* Queues
-* IVRs
-* Routes
-* Feature Codes
+    EXTENSIONS {
+        ulid id PK
+        ulid tenant_id FK
+        string extension_number
+        string display_name
+    }
 
-Outputs:
-
-```text
-*_captain.conf
+    DEVICES {
+        ulid id PK
+        ulid tenant_id FK
+        ulid extension_id FK
+        string auth_username
+        string sip_password
+    }
 ```
 
-Asterisk consumes generated configuration.
-
-The generated files are outputs, not the source of truth.
-
 ---
 
-## Event Processing
+## 4. Multi-Tenant Data Isolation & Request Lifecycle
 
-Captain Core owns the telephony event pipeline.
+Database isolation enforces a **fail-closed model**. Repositories verify `TenantContext` before building SQL queries.
 
-Sources:
+```mermaid
+flowchart TB
+  Req[Incoming HTTP Request] --> Auth[1. Authenticate Token / Session]
+  Auth --> ResolveCtx[2. Resolve Server-Side TenantContext]
+  ResolveCtx --> Authz[3. Validate User Permissions for Tenant]
+  Authz --> Repo[4. Invoke Captain Core Tenant Repository]
+  
+  subgraph DataGuard [Fail-Closed Tenant Guard]
+    Repo --> Check{TenantContext Active?}
+    Check -->|No| Fail[Throw SecurityException / Fail Closed]
+    Check -->|Yes| Inject[Inject tenant_id = Context into Query]
+    Inject --> DB[(Execute MariaDB SQL)]
+  end
 
-* AMI
-* CEL
-* CDR
-* ARI Events
-
-Pipeline:
-
-```text
-Asterisk
-    ↓
-Event Pump
-    ↓
-Normalization
-    ↓
-Redis
-    ↓
-Consumers
+  DB --> Audit[5. Record Event in Captain Audit]
+  Audit --> Resp[6. Return Response JSON]
 ```
 
-Consumers include:
-
-* Reporting
-* Queues
-* Presence
-* Voice AI
-* CRM Integrations
-
 ---
 
-## Job Framework
+## 5. Module System & Dependency Architecture
 
-Captain Core provides platform scheduling.
+Product features are isolated into self-contained modules located in `/usr/src/captainpbx-modules/{id}`. Dependencies between modules are strictly acyclic.
 
-Architecture:
+```mermaid
+flowchart TD
+  Core[Captain Core Platform Services]
+  
+  subgraph Foundation Modules
+    Identity[identity]
+    Auth[auth]
+    Tenants[tenants]
+    Roles[roles]
+    Users[users]
+    AsteriskMod[asterisk]
+  end
 
-```text
-Scheduler
-    ↓
-Redis Queue
-    ↓
-Workers
-    ↓
-Job Handlers
+  subgraph Feature Modules
+    ExtMod[extensions]
+    DevMod[devices]
+    CDRMod[cdr]
+    ShieldMod[captainshield]
+    TrustMod[captaintrust]
+    SystemMod[captainsystem]
+    GroupMod[groups]
+    DirMod[directory]
+  end
+
+  Identity --> Core
+  Auth --> Identity
+  Tenants --> Core
+  Tenants --> Auth
+  Roles --> Core
+  Users --> Core
+  Users --> Identity
+  Users --> Tenants
+  Users --> Roles
+  
+  AsteriskMod --> Core
+  ExtMod --> Tenants
+  ExtMod --> AsteriskMod
+  DevMod --> ExtMod
+  DevMod --> AsteriskMod
+  CDRMod --> Tenants
+  CDRMod --> AsteriskMod
+  ShieldMod --> Core
+  TrustMod --> Core
+  SystemMod --> Core
+  GroupMod --> Tenants
+  GroupMod --> Users
+  DirMod --> Tenants
 ```
 
-Responsibilities:
-
-* Scheduling
-* Concurrency control
-* Timeouts
-* Retry policies
-* Run history
-* Tenant fairness
-
-Modules register JobHandlers.
-
-Core executes them.
-
 ---
 
-## System Agent Integration
+## 6. Asterisk PJSIP Endpoint Compilation
 
-Captain Core is the only component allowed to communicate with the System Agent.
+Creating an Extension automatically generates an owning User and a default SIP Device. The config compiler generates isolated PJSIP blocks for Asterisk.
 
-```text
-Module
-    ↓
-Captain Core
-    ↓
-System Agent
-    ↓
-Operating System
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Admin as Admin User
+  participant API as Extensions Module
+  participant Comp as Config Compiler
+  participant File as /var/lib/captainpbx/asterisk/
+  participant Ast as Asterisk Engine
+
+  Admin->>API: Create Extension 1001 (Name: Alice)
+  API->>API: Auto-provision Owner User "Alice" & Device "acme-1001-1"
+  API->>Comp: Trigger PJSIP Build
+  Comp->>File: Write pjsip_endpoints_captain.conf
+  Comp->>File: Write pjsip_auths_captain.conf
+  Comp->>File: Write pjsip_aors_captain.conf
+  API->>Ast: Send AMI Reload Command (module reload res_pjsip.so)
+  Ast-->>Admin: Device acme-1001-1 Ready for SIP Registration
 ```
-
-Modules never:
-
-* shell_exec()
-* sudo
-* exec()
-* system()
-
-All privileged operations are routed through approved platform services.
-
----
-
-## Module Development Rules
-
-Modules must:
-
-* Consume Captain Core services
-* Respect TenantContext
-* Use Records repositories
-* Generate audit events
-* Register permissions
-* Register routes through platform APIs
-
-Modules must not:
-
-* Bypass authorization
-* Access another tenant directly
-* Modify Asterisk files
-* Execute operating system commands
-* Create alternative tenancy models
-
----
-
-## Core Runtime Services
-
-### Web Layer
-
-* Nginx
-* PHP-FPM
-
-### Data Layer
-
-* MariaDB
-* Redis
-
-### Background Services
-
-* captain-worker
-* captain-scheduler
-* captain-asterisk-events
-
-### Privileged Services
-
-* captain-system-agent
-
-### Media Services
-
-* Asterisk
-
----
-
-## Design Goals
-
-Captain Core exists to provide:
-
-1. Multi-tenant isolation
-2. Security by default
-3. Reusable PBX services
-4. Consistent module development
-5. Safe Asterisk integration
-6. Operational observability
-7. Long-term maintainability
-
-Product functionality belongs in modules.
-
-Platform functionality belongs in Captain Core.
-
